@@ -553,17 +553,26 @@ class LabelTensor(torch.Tensor):
         :raises: ValueError: If the index type is not supported.
         """
         old_dof = self._labels[dim]["dof"]
+        # Handle tensors first, the most common index type
+        if isinstance(index, torch.Tensor):
+            # Handle boolean masks
+            if index.dtype == torch.bool:
+                index = index.nonzero().squeeze()
+            if not isinstance(old_dof, list):
+                new_dof = index
+            elif index.ndim == 1:
+                # Convert to Python ints once instead of iterating the tensor
+                new_dof = [old_dof[i] for i in index.tolist()]
+            else:
+                new_dof = [old_dof[i] for i in index]
         # Handle slicing
-        if isinstance(index, slice):
+        elif isinstance(index, slice):
             new_dof = old_dof[index]
         # Handle single integer index
         elif isinstance(index, int):
             new_dof = [old_dof[index]]
-        # Handle lists or tensors
-        elif isinstance(index, (list, torch.Tensor)):
-            # Handle list of bools
-            if isinstance(index, torch.Tensor) and index.dtype == torch.bool:
-                index = index.nonzero().squeeze()
+        # Handle lists
+        elif isinstance(index, list):
             new_dof = (
                 [old_dof[i] for i in index]
                 if isinstance(old_dof, list)
@@ -601,17 +610,19 @@ class LabelTensor(torch.Tensor):
         ):
             return self.extract(index)
 
-        # Retrieve selected tensor and labels
-        selected_tensor = super().__getitem__(index)
+        # Index the plain tensor to skip the subclass dispatch overhead; the
+        # result is cast back to the subclass once the labels are updated
+        selected_tensor = self.tensor[index]
         if not hasattr(self, "_labels"):
-            return selected_tensor
+            return selected_tensor.as_subclass(type(self))
 
         original_labels = self._labels
-        updated_labels = copy(original_labels)
+        # Shallow copy via dict.copy, cheaper than the generic copy.copy
+        updated_labels = original_labels.copy()
 
         # Ensure the index is iterable
         if not isinstance(index, tuple):
-            index = [index]
+            index = (index,)
 
         # Update labels based on the index
         offset = 0
@@ -623,7 +634,8 @@ class LabelTensor(torch.Tensor):
                     # dimensions due to int index on a non labled dimension
                     dim_ = dim - removed
                     selected_tensor = selected_tensor.unsqueeze(dim_)
-                if idx != slice(None):
+                # Tensors never equal slice(None); skip the costly comparison
+                if isinstance(idx, torch.Tensor) or idx != slice(None):
                     # Update the labels for the selected dimension
                     updated_labels[offset] = {
                         "dof": self._update_single_label(idx, dim),
@@ -642,6 +654,7 @@ class LabelTensor(torch.Tensor):
             offset += 1
 
         # Update the selected tensor's labels
+        selected_tensor = selected_tensor.as_subclass(type(self))
         selected_tensor._labels = updated_labels
         return selected_tensor
 
