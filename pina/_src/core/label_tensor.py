@@ -754,26 +754,31 @@ class LabelTensor(torch.Tensor):
         if len(tensors) == 1:
             return tensors[0]
 
-        # Initialize result tensor and labels
-        data = torch.zeros_like(tensors[0].tensor).to(tensors[0].device)
-        last_dim_labels = []
+        # Unwrap once to avoid LabelTensor dispatch overhead in the loop
+        plains = [tensor.as_subclass(Tensor) for tensor in tensors]
+        last_dim = plains[0].ndim - 1
 
-        # Accumulate tensors
-        for tensor in tensors:
-            data += tensor.tensor
-            last_dim_labels.append(tensor.labels)
+        # Accumulate tensors into a copy of the first one
+        data = plains[0].clone()
+        for plain in plains[1:]:
+            data.add_(plain)
 
         # Construct last dimension labels
-        last_dim_labels = ["+".join(items) for items in zip(*last_dim_labels)]
+        dofs = [
+            tensor.stored_labels.get(last_dim, {}).get("dof")
+            for tensor in tensors
+        ]
+        last_dim_labels = list(map("+".join, zip(*dofs)))
 
-        # Update the labels for the resulting tensor
-        labels = {k: copy(v) for k, v in tensors[0].stored_labels.items()}
-        labels[tensors[0].ndim - 1] = {
-            "dof": last_dim_labels,
-            "name": tensors[0].name,
+        # Reuse the already validated labels and only validate the new ones
+        result = data.as_subclass(LabelTensor)
+        result._labels = {
+            k: copy(v) for k, v in tensors[0].stored_labels.items()
         }
-
-        return LabelTensor(data, labels)
+        result._init_labels_from_dict(
+            {last_dim: {"dof": last_dim_labels, "name": data.name}}
+        )
+        return result
 
     def reshape(self, *shape):
         """
