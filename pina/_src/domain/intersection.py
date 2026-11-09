@@ -1,6 +1,8 @@
 """Module for the Intersection operation."""
 
 import random
+from itertools import islice
+import torch
 from pina._src.domain.base_operation import BaseOperation
 from pina._src.core.label_tensor import LabelTensor
 from pina._src.core.utils import check_consistency
@@ -39,7 +41,19 @@ class Intersection(BaseOperation):
         :return: Whether the point is inside the domain or not.
         :rtype: bool
         """
-        # Checks on point
+        self._check_point(point)
+        checks = [g.is_inside for g in self.geometries]
+        return self._is_inside_geometries(point, checks, check_border)
+
+    def _check_point(self, point):
+        """
+        Check that a point is a :class:`LabelTensor` with the domain variables.
+
+        :param LabelTensor point: The point to check.
+        :raises ValueError: If ``point`` is not a :class:`LabelTensor`.
+        :raises ValueError: If the labels of ``point`` differ from the variables
+            of the domain.
+        """
         check_consistency(point, LabelTensor)
         if set(self.variables) != set(point.labels):
             raise ValueError(
@@ -47,7 +61,19 @@ class Intersection(BaseOperation):
                 f"Got {sorted(point.labels)}, expected {self.variables}."
             )
 
-        return all(g.is_inside(point, check_border) for g in self.geometries)
+    def _is_inside_geometries(self, point, checks, check_border=False):
+        """
+        Check if an already validated point is inside all the given domains.
+
+        :param LabelTensor point: The point to check.
+        :param list checks: The ``is_inside`` methods of the domains to check,
+            in the order of the checks.
+        :param bool check_border: If ``True``, the boundary is considered inside
+            the domain. Default is ``False``.
+        :return: Whether the point is inside the domain or not.
+        :rtype: bool
+        """
+        return all(check(point, check_border) for check in checks)
 
     def sample(self, n, mode="random", variables="all"):
         """
@@ -96,24 +122,43 @@ class Intersection(BaseOperation):
             if alloc[idx] == 0:
                 continue
 
+            # Check the sampling geometry last, since its own points are
+            # almost always inside it and the others reject points sooner
+            # Bind the is_inside methods once for all the batches
+            checks = [
+                g.is_inside for j, g in enumerate(self.geometries) if j != gi
+            ]
+            checks.append(self.geometries[gi].is_inside)
+
             # Sampled points for the current geometry
             sampled_points = []
+            num_sampled = 0
 
             # Sample until we have enough points
-            while len(sampled_points) < alloc[idx]:
+            while num_sampled < alloc[idx]:
 
                 # Sample a sufficiently large number of points
-                batch_size = 2 * (alloc[idx] - len(sampled_points))
+                batch_size = 2 * (alloc[idx] - num_sampled)
                 pts = self.geometries[gi].sample(batch_size, mode)
 
-                # Filter points inside the intersection
-                for p in pts:
-                    p = p.reshape(1, -1)
-                    p.labels = pts.labels
-                    if self.is_inside(p):
-                        sampled_points.append(p[variables])
-                        if len(sampled_points) >= alloc[idx]:
-                            break
+                # Validate the batch once, then check each point
+                self._check_point(pts)
+
+                # Lazily take the first indices of points inside the
+                # intersection, stopping as soon as enough are found. The
+                # checks only produce booleans, so autograd is not needed
+                inside = (
+                    i
+                    for i in range(len(pts))
+                    if self._is_inside_geometries(pts[i : i + 1], checks)
+                )
+                with torch.inference_mode():
+                    accepted = list(islice(inside, alloc[idx] - num_sampled))
+
+                # Extract the accepted points at once
+                if accepted:
+                    sampled_points.append(pts[accepted][variables])
+                    num_sampled += len(accepted)
 
             # Sample points
             samples.append(LabelTensor.cat(sampled_points, dim=0))
