@@ -510,19 +510,21 @@ class LabelTensor(torch.Tensor):
             )
             return new_label_tensor
         if mode == "cross":
-            # Crete tensor and call cat on last dimension
-            tensor1 = self
-            tensor2 = tensor
-            n1 = tensor1.shape[0]
-            n2 = tensor2.shape[0]
-            tensor1 = LabelTensor(tensor1.repeat(n2, 1), labels=tensor1.labels)
-            tensor2 = LabelTensor(
-                tensor2.repeat_interleave(n1, dim=0), labels=tensor2.labels
+            # Allocate the result once and fill it through a (n2, n1, d)
+            # view: every row of tensor is paired with all rows of self
+            d1 = self.shape[-1]
+            out = self.tensor.new_empty(
+                (tensor.shape[0], self.shape[0], d1 + tensor.shape[-1]),
+                dtype=torch.result_type(self, tensor),
             )
-            new_label_tensor = LabelTensor.cat(
-                [tensor1, tensor2], dim=self.ndim - 1
-            )
-            return new_label_tensor
+            out[..., :d1] = self.tensor
+            out[..., d1:] = tensor.tensor[:, None]
+            result = LabelTensor(out.flatten(0, 1), None)
+            if self.labels is not None:
+                last = self.ndim - 1
+                dof = self.labels + tensor.labels
+                result._labels = {last: {"dof": dof, "name": last}}
+            return result
         raise ValueError('mode must be either "std" or "cross"')
 
     @staticmethod
