@@ -343,34 +343,29 @@ class LabelTensor(torch.Tensor):
 
             # Perform concatenation
         cat_tensor = torch.cat(tensors, dim=dim)
-        tensors_labels = [tensor.stored_labels for tensor in tensors]
+        labels = tensors[0].stored_labels
 
         # Check label consistency across tensors, excluding the
         # concatenation dimension
-        for key in tensors_labels[0]:
+        for key, value in labels.items():
             if key != dim:
-                if any(
-                    tensors_labels[i][key] != tensors_labels[0][key]
-                    for i in range(len(tensors_labels))
-                ):
-                    raise RuntimeError(
-                        f"Tensors must have the same labels along all "
-                        f"dimensions except {dim}."
-                    )
+                for tensor in tensors:
+                    if tensor.stored_labels[key] != value:
+                        raise RuntimeError(
+                            f"Tensors must have the same labels along all "
+                            f"dimensions except {dim}."
+                        )
 
-        # Copy and update the 'dof' for the concatenation dimension
-        cat_labels = {k: copy(v) for k, v in tensors_labels[0].items()}
-
-        # Update labels if the concatenation dimension has labels
-        if dim in tensors[0].stored_labels:
-            if dim in cat_labels:
-                cat_dofs = [label[dim]["dof"] for label in tensors_labels]
-                cat_labels[dim]["dof"] = sum(cat_dofs, [])
-        else:
-            cat_labels = tensors[0].stored_labels
+        # Copy labels and concatenate the 'dof' of the concatenation dimension
+        if dim in labels:
+            dof = []
+            for tensor in tensors:
+                dof.extend(tensor.stored_labels[dim]["dof"])
+            labels = {k: copy(v) for k, v in labels.items()}
+            labels[dim]["dof"] = dof
 
         # Assign updated labels to the concatenated tensor
-        cat_tensor._labels = cat_labels
+        cat_tensor._labels = labels
         return cat_tensor
 
     @staticmethod
