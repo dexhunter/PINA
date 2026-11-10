@@ -144,47 +144,39 @@ class CartesianDomain(BaseDomain):
         range_vars = [v for v in variables if v in self._range]
         fixed_vars = [v for v in variables if v in self._fixed]
 
-        # If there are no range variables, return fixed variables only
-        if not range_vars:
-            vals = [torch.full((n, 1), self._fixed[v]) for v in fixed_vars]
-            result = torch.cat(vals, dim=1)
-            result = result.as_subclass(LabelTensor)
-            result.labels = fixed_vars
-            return result
-
-        # Create a tensor of bounds for the range variables
-        bounds = torch.as_tensor([self._range[v] for v in range_vars])
-
-        # Sample for mode random or latin hypercube
-        if mode in {"random", "lh", "latin"}:
-            pts = self._sample_range(n, mode, bounds)
-
-        # Sample for mode grid or chebyshev
-        else:
+        # Range columns are views of one draw (random, latin hypercube) or of
+        # the grid axes (grid, chebyshev)
+        draw, axes = None, ()
+        if range_vars and mode in {"random", "lh", "latin"}:
+            bounds = torch.as_tensor([self._range[v] for v in range_vars])
+            draw = self._sample_range(n, mode, bounds)
+            axes = draw.unbind(1)
+        elif range_vars:
             grids = [
                 self._sample_range(
                     n, mode, torch.as_tensor([self._range[v]])
                 ).reshape(-1)
                 for v in range_vars
             ]
-            pts = torch.cartesian_prod(*grids).reshape(-1, len(grids))
+            axes = torch.meshgrid(*grids, indexing="ij")
 
-        # Add fixed vars
-        if fixed_vars:
-            fixed_vals = [
-                torch.full((pts.shape[0], 1), self._fixed[v])
-                for v in fixed_vars
-            ]
-            pts = torch.cat([pts] + fixed_vals, dim=1)
-            labels = range_vars + fixed_vars
-        else:
-            labels = range_vars
+        # Fixed columns expand a single value and use no memory
+        by_name = dict(zip(range_vars, axes))
+        for v in fixed_vars:
+            by_name[v] = torch.full((), self._fixed[v]).expand(n)
+
+        # Copy the columns once, in sorted order, unless the draw already is
+        # the result (torch_lhs returns a non-contiguous tensor)
+        pts = draw
+        if pts is None or fixed_vars or not pts.is_contiguous():
+            columns = torch.broadcast_tensors(*(by_name[v] for v in variables))
+            pts = torch.stack(columns, dim=-1).reshape(-1, len(variables))
 
         # Create the result as a LabelTensor
         pts = pts.as_subclass(LabelTensor)
-        pts.labels = labels
+        pts.labels = variables
 
-        return pts[sorted(pts.labels)]
+        return pts
 
     def _sample_range(self, n, mode, bounds):
         """
@@ -211,7 +203,10 @@ class CartesianDomain(BaseDomain):
         # Sample points in [0, 1]^d and rescale to the desired bounds
         pts = samplers[mode]()
 
-        return pts * (bounds[:, 1] - bounds[:, 0]) + bounds[:, 0]
+        # Rescale in place, with the dtype promoted as for the bounds
+        pts = pts.to(torch.result_type(pts, bounds))
+
+        return pts.mul_(bounds[:, 1] - bounds[:, 0]).add_(bounds[:, 0])
 
     def partial(self):
         """
